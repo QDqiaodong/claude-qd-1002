@@ -15,6 +15,9 @@ CREATE DATABASE IF NOT EXISTS electronics_assembly
 USE electronics_assembly;
 
 SET FOREIGN_KEY_CHECKS = 0;
+DROP TABLE IF EXISTS changeover_log;
+DROP TABLE IF EXISTS changeover_batch;
+DROP TABLE IF EXISTS line_config;
 DROP TABLE IF EXISTS inspection;
 DROP TABLE IF EXISTS smt_step;
 DROP TABLE IF EXISTS bom_item;
@@ -80,6 +83,66 @@ CREATE TABLE inspection (
     repair_done   TINYINT(1)  NOT NULL DEFAULT 0 COMMENT '返修是否闭环',
     checked_at    DATETIME,
     CONSTRAINT fk_insp_order FOREIGN KEY (order_id) REFERENCES work_order (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------- 产线配置：每工单一条「当前配置」，换线比对的唯一事实来源 ----------------
+-- 更换设备 / 飞达配置 / 关键工艺参数 = 修改本行且 version + 1。
+-- 改配置与首件确认都对本行加悲观写锁（SELECT ... FOR UPDATE），保证两者串行。
+CREATE TABLE line_config (
+    id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+    order_id       BIGINT       NOT NULL UNIQUE,
+    equipment_no   VARCHAR(32)  NOT NULL COMMENT '贴片设备编号',
+    feeder_setup   VARCHAR(255) NOT NULL COMMENT '飞达配置：槽位:料号，逗号分隔',
+    reflow_profile VARCHAR(32)  NOT NULL COMMENT '回流焊温度曲线（关键工艺参数）',
+    stencil_no     VARCHAR(32)  NOT NULL COMMENT '钢网编号',
+    version        INT          NOT NULL DEFAULT 1 COMMENT '配置版本号，每次修改 +1',
+    updated_by     VARCHAR(32),
+    updated_at     DATETIME,
+    CONSTRAINT fk_cfg_order FOREIGN KEY (order_id) REFERENCES work_order (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------- 换线批次：一次配置版本对应的首件放行单 ----------------
+-- 建立时冻结配置快照与版本号；状态：待首件 → 待确认 → 已放行/已驳回，未终态可因配置再变更而失效。
+-- active_flag：活跃（待首件/待确认）= 1，终态 = NULL；uk_co_active 让一张工单同一时刻最多一个活跃批次
+-- （MySQL 唯一索引中 NULL 不参与冲突）。
+CREATE TABLE changeover_batch (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    order_id         BIGINT       NOT NULL,
+    batch_no         VARCHAR(40)  NOT NULL UNIQUE COMMENT 'CO-工单号-R序号',
+    revision         INT          NOT NULL COMMENT '该工单第几个批次',
+    config_version   INT          NOT NULL COMMENT '对应的配置版本号',
+    equipment_no     VARCHAR(32)  NOT NULL COMMENT '快照：贴片设备',
+    feeder_setup     VARCHAR(255) NOT NULL COMMENT '快照：飞达配置',
+    reflow_profile   VARCHAR(32)  NOT NULL COMMENT '快照：回流焊曲线',
+    stencil_no       VARCHAR(32)  NOT NULL COMMENT '快照：钢网编号',
+    config_diff      TEXT COMMENT '与上一版本的字段级差异（JSON 数组）',
+    status           VARCHAR(16)  NOT NULL COMMENT '待首件/待确认/已放行/已驳回/已失效',
+    fa_result        VARCHAR(8)   COMMENT '首件结论：合格/不合格',
+    fa_defect_points INT          COMMENT '首件不良点数',
+    fa_note          VARCHAR(255) COMMENT '首件检测说明',
+    submitted_by     VARCHAR(32)  COMMENT '首件提交人（操作员）',
+    submitted_at     DATETIME,
+    confirmed_by     VARCHAR(32)  COMMENT '确认/驳回人（质检员，不得与提交人相同）',
+    confirmed_at     DATETIME,
+    reject_reason    VARCHAR(255) COMMENT '驳回原因（驳回必填）',
+    active_flag      TINYINT      COMMENT '1=活跃（待首件/待确认），NULL=终态',
+    created_by       VARCHAR(32),
+    created_at       DATETIME,
+    CONSTRAINT fk_co_order FOREIGN KEY (order_id) REFERENCES work_order (id),
+    UNIQUE KEY uk_co_active (order_id, active_flag)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------- 换线处理记录：批次全生命周期审计 ----------------
+CREATE TABLE changeover_log (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id    BIGINT      NOT NULL,
+    action      VARCHAR(16) NOT NULL COMMENT '建批/提交首件/确认放行/驳回/批次失效',
+    actor       VARCHAR(32),
+    from_status VARCHAR(16),
+    to_status   VARCHAR(16),
+    detail      VARCHAR(255),
+    created_at  DATETIME,
+    CONSTRAINT fk_log_batch FOREIGN KEY (batch_id) REFERENCES changeover_batch (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- =====================================================================
