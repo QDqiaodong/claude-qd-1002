@@ -16,15 +16,18 @@ import com.electronics.assembly.repository.SmtStepRepository;
  *
  * <p>核心规则：① 工序按「上料 → 贴片 → 回流焊 → AOI → 目检」固定顺序推进，
  * 前一道没完成不能开下一道；② 状态流转：待执行 → 进行中 → 已完成；
- * ③ 已完成的工序不能回退。</p>
+ * ③ 已完成的工序不能回退；④ 工单存在未放行的换线批次时，贴片工序
+ * 不能开工也不能完工（首件确认前不得批量贴片），已完成的历史工序不受影响。</p>
  */
 @Service
 public class SmtStepService {
 
     private final SmtStepRepository stepRepository;
+    private final LineChangeService lineChangeService;
 
-    public SmtStepService(SmtStepRepository stepRepository) {
+    public SmtStepService(SmtStepRepository stepRepository, LineChangeService lineChangeService) {
         this.stepRepository = stepRepository;
+        this.lineChangeService = lineChangeService;
     }
 
     public List<SmtStep> list(Long orderId, String status) {
@@ -65,6 +68,8 @@ public class SmtStepService {
         if (!Dict.canTransferStep(step.getStatus(), "进行中")) {
             throw new BizException("工序「" + step.getStepName() + "」当前为「" + step.getStatus() + "」，不能开工");
         }
+        // 规则④：换线批次未放行时，阻止工单从上料推进到贴片
+        lineChangeService.assertStepReleased(step.getOrder().getId(), step.getStepName(), "开工");
         step.setStatus("进行中");
         step.setOperator(operator == null || operator.isBlank() ? "未指派" : operator);
         step.setStartedAt(LocalDateTime.now());
@@ -78,6 +83,8 @@ public class SmtStepService {
         if (!Dict.canTransferStep(step.getStatus(), "已完成")) {
             throw new BizException("只有「进行中」的工序能完工，当前状态：" + step.getStatus());
         }
+        // 规则④：换线批次未放行时，进行中的贴片也不能完工（首件确认前不得批量贴片）
+        lineChangeService.assertStepReleased(step.getOrder().getId(), step.getStepName(), "完工");
         step.setStatus("已完成");
         step.setFinishedAt(LocalDateTime.now());
         return stepRepository.save(step);

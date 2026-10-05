@@ -11,6 +11,7 @@ import api from '../api'
 
 const routeQuery = computed(() => router.currentRoute.value.query || {})
 const orders = ref([])
+const lcMap = ref({})
 const error = ref('')
 const tip = ref('')
 const openId = ref(null)
@@ -31,9 +32,20 @@ async function load() {
   error.value = ''
   try {
     const q = routeQuery.value.q
-    orders.value = await api.listOrders(q ? { status: q } : {})
+    const [list, summary] = await Promise.all([
+      api.listOrders(q ? { status: q } : {}),
+      api.lineChangeSummary()
+    ])
+    orders.value = list
     if (!orders.value.length && q) orders.value = await api.listOrders()
+    const m = {}
+    for (const s of summary) m[s.orderId] = s
+    lcMap.value = m
   } catch (e) { error.value = e.message }
+}
+
+function goLineChange(id) {
+  router.push('/line-change?order=' + id)
 }
 
 async function release(id) {
@@ -101,6 +113,9 @@ onMounted(load)
             <div class="wo-top">
               <span class="wo-no">{{ o.orderNo }}</span>
               <span class="wo-model">{{ o.productModel }}</span>
+              <span v-if="lcMap[o.id]" class="wo-lc" :class="{ blocked: lcMap[o.id].blocked }">
+                换线V{{ lcMap[o.id].versionNo }}·{{ lcMap[o.id].status }}
+              </span>
               <span class="wo-tag">{{ o.status }}</span>
             </div>
             <div class="wo-bar">
@@ -114,6 +129,16 @@ onMounted(load)
             </div>
 
             <div v-if="openId === o.id" class="wo-detail" @click.stop>
+              <div v-if="lcMap[o.id]" class="lc-line" :class="{ blocked: lcMap[o.id].blocked }">
+                <template v-if="lcMap[o.id].blocked">
+                  换线批次 V{{ lcMap[o.id].versionNo }}（{{ lcMap[o.id].status }}）未放行，贴片暂停 ——
+                  {{ lcMap[o.id].nextAction }}；处理人：{{ lcMap[o.id].handler }}
+                </template>
+                <template v-else>
+                  换线批次 V{{ lcMap[o.id].versionNo }}（{{ lcMap[o.id].status }}），贴片不受换线约束
+                </template>
+                <button class="act sm" @click="goLineChange(o.id)">换线详情</button>
+              </div>
               <div class="op-row">
                 <button class="act primary" :disabled="o.status !== '待投产'" @click="release(o.id)">投产</button>
                 <span class="op-label">报工</span>
@@ -161,6 +186,15 @@ onMounted(load)
 .wo-no { font-weight: 800; color: var(--primary-deep); font-size: 13px; }
 .wo-model { font-size: 11px; color: var(--muted); }
 .wo-tag { margin-left: auto; font-size: 10px; padding: 1px 7px; border-radius: 9px; background: var(--primary-wash); color: var(--primary-deep); font-weight: 700; }
+.wo-lc { font-size: 10px; padding: 1px 7px; border-radius: 9px; background: #e8f5e9; color: #2e7d32; font-weight: 700; }
+.wo-lc.blocked { background: #fdecea; color: #c62828; }
+
+.lc-line {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 11px; color: #2e7d32; background: #eef7ee;
+  border: 1px solid #c8e6c9; border-radius: 7px; padding: 6px 9px; margin-bottom: 8px;
+}
+.lc-line.blocked { color: #a32b20; background: #fdecea; border-color: #f5c6c2; }
 
 .wo-bar { height: 6px; background: #eef0fa; border-radius: 3px; margin: 7px 0 5px; overflow: hidden; }
 .wo-bar-fill { height: 100%; background: linear-gradient(90deg, var(--primary), var(--primary-soft)); }

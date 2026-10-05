@@ -48,6 +48,17 @@ export default {
   finishStep: (id) => call(http.post(`/smt-steps/${id}/finish`)),
   resetStep: (id) => call(http.post(`/smt-steps/${id}/reset`)),
 
+  // ---------------- 换线首件放行 ----------------
+  listLineChanges: (p) => call(http.get('/line-changes', params(p))),
+  getLineChangeContext: (orderId) => call(http.get(`/line-changes/order/${orderId}/context`)),
+  getLineChangeBlocking: (orderId) => call(http.get(`/line-changes/order/${orderId}/blocking`)),
+  lineChangeSummary: () => call(http.get('/line-changes/summary')),
+  createLineChange: (d) => call(http.post('/line-changes', d)),
+  submitFirstPiece: (id, d) => call(http.post(`/line-changes/${id}/first-piece`, d)),
+  confirmLineChange: (id, d) => call(http.post(`/line-changes/${id}/confirm`, d)),
+  rejectLineChange: (id, d) => call(http.post(`/line-changes/${id}/reject`, d)),
+  reviseLineChange: (id, d) => call(http.post(`/line-changes/${id}/revise`, d)),
+
   // ---------------- 质检与返修 ----------------
   listInspections: (p) => call(http.get('/inspections', params(p))),
   createInspection: (d) => call(http.post('/inspections', d)),

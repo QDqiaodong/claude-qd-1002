@@ -13,9 +13,11 @@ import com.electronics.assembly.common.BizException;
 import com.electronics.assembly.common.Dict;
 import com.electronics.assembly.dto.ShortageLine;
 import com.electronics.assembly.entity.BomItem;
+import com.electronics.assembly.entity.OrderLineConfig;
 import com.electronics.assembly.entity.SmtStep;
 import com.electronics.assembly.entity.WorkOrder;
 import com.electronics.assembly.repository.BomItemRepository;
+import com.electronics.assembly.repository.OrderLineConfigRepository;
 import com.electronics.assembly.repository.SmtStepRepository;
 import com.electronics.assembly.repository.WorkOrderRepository;
 
@@ -24,7 +26,7 @@ import com.electronics.assembly.repository.WorkOrderRepository;
  *
  * <p>核心规则：① 机型必须有 BOM，否则算不出齐套；② 投产前必须通过齐套校验
  * （缺料行为 0，且齐套率不低于 {@link Dict#MIN_KIT_RATE}）；③ 状态只能逐级推进；
- * ④ 投产时自动铺开 SMT 五道工序。</p>
+ * ④ 投产时自动铺开 SMT 五道工序，并登记初始产线配置作为换线比对基准。</p>
  */
 @Service
 public class WorkOrderService {
@@ -32,13 +34,16 @@ public class WorkOrderService {
     private final WorkOrderRepository orderRepository;
     private final BomItemRepository bomRepository;
     private final SmtStepRepository stepRepository;
+    private final OrderLineConfigRepository configRepository;
 
     public WorkOrderService(WorkOrderRepository orderRepository,
                             BomItemRepository bomRepository,
-                            SmtStepRepository stepRepository) {
+                            SmtStepRepository stepRepository,
+                            OrderLineConfigRepository configRepository) {
         this.orderRepository = orderRepository;
         this.bomRepository = bomRepository;
         this.stepRepository = stepRepository;
+        this.configRepository = configRepository;
     }
 
     public List<WorkOrder> list(String status, String productModel) {
@@ -182,6 +187,19 @@ public class WorkOrderService {
                 s.setStatus("待执行");
                 stepRepository.save(s);
             }
+        }
+
+        // 规则④：登记初始产线配置，作为后续换线批次的比对基准
+        if (configRepository.findById(saved.getId()).isEmpty()) {
+            OrderLineConfig cfg = new OrderLineConfig();
+            cfg.setOrderId(saved.getId());
+            cfg.setEquipmentNo("SMT-01");
+            cfg.setFeederConfig("按 BOM 默认飞达位");
+            cfg.setKeyParams("标准工艺参数");
+            cfg.setConfigHash(Dict.configHash(cfg.getEquipmentNo(), cfg.getFeederConfig(), cfg.getKeyParams()));
+            cfg.setUpdatedBy("系统");
+            cfg.setUpdatedAt(LocalDateTime.now());
+            configRepository.save(cfg);
         }
         return saved;
     }

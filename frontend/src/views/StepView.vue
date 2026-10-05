@@ -11,6 +11,7 @@ import api from '../api'
 
 const orders = ref([])
 const steps = ref([])
+const blockInfo = ref(null)
 const selectedId = ref(null)
 const error = ref('')
 const tip = ref('')
@@ -45,8 +46,11 @@ async function load() {
 }
 
 async function loadSteps() {
-  if (!selectedId.value) { steps.value = []; return }
+  if (!selectedId.value) { steps.value = []; blockInfo.value = null; return }
   steps.value = await api.listSteps({ orderId: selectedId.value })
+  try {
+    blockInfo.value = await api.getLineChangeBlocking(selectedId.value)
+  } catch (e) { blockInfo.value = null }
 }
 
 async function act(name, kind) {
@@ -76,6 +80,12 @@ onMounted(load)
 
       <div v-if="error" class="err">{{ error }}</div>
       <div v-if="tip" class="ok-tip">{{ tip }}</div>
+
+      <div v-if="blockInfo && blockInfo.blocked && blockInfo.batch" class="lc-banner">
+        换线批次 V{{ blockInfo.batch.versionNo }}（{{ blockInfo.batch.status }}）未放行，贴片工序已暂停 ——
+        {{ blockInfo.nextAction }}；处理人：{{ blockInfo.handler }}。
+        到「换线首件」页完成首件确认后才能恢复。
+      </div>
 
       <div class="stat-row">
         <div class="stat"><div class="k">已完成工序</div><div class="v">{{ doneCount }} / {{ STEPS.length }}</div></div>
@@ -166,4 +176,9 @@ onMounted(load)
 .node-op { font-size: 10px; color: var(--muted); }
 
 .note { font-size: 12px; color: var(--muted); margin-top: 10px; }
+
+.lc-banner {
+  border: 1px solid #f5c6c2; background: #fdecea; color: #a32b20;
+  padding: 8px 12px; border-radius: 8px; margin-bottom: 10px; font-size: 13px; font-weight: 700;
+}
 </style>

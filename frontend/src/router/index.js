@@ -5,6 +5,7 @@ import { createRouter, createWebHashHistory } from 'vue-router'
 import OrderView from '../views/OrderView.vue'
 import KitView from '../views/KitView.vue'
 import StepView from '../views/StepView.vue'
+import LineChangeView from '../views/LineChangeView.vue'
 import InspectionView from '../views/InspectionView.vue'
 
 const routes = [
@@ -12,6 +13,7 @@ const routes = [
   { path: '/order', name: 'order', component: OrderView },
   { path: '/kit', name: 'kit', component: KitView },
   { path: '/step', name: 'step', component: StepView },
+  { path: '/line-change', name: 'line-change', component: LineChangeView },
   { path: '/inspection', name: 'inspection', component: InspectionView },
   { path: '/:pathMatch(.*)*', redirect: '/order' }
 ]

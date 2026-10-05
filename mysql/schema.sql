@@ -15,6 +15,9 @@ CREATE DATABASE IF NOT EXISTS electronics_assembly
 USE electronics_assembly;
 
 SET FOREIGN_KEY_CHECKS = 0;
+DROP TABLE IF EXISTS line_change_event;
+DROP TABLE IF EXISTS line_change_batch;
+DROP TABLE IF EXISTS order_line_config;
 DROP TABLE IF EXISTS inspection;
 DROP TABLE IF EXISTS smt_step;
 DROP TABLE IF EXISTS bom_item;
@@ -82,6 +85,57 @@ CREATE TABLE inspection (
     CONSTRAINT fk_insp_order FOREIGN KEY (order_id) REFERENCES work_order (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- ---------------- 工单当前产线配置（换线比对基准 + 并发锁定点） ----------------
+CREATE TABLE order_line_config (
+    order_id      BIGINT PRIMARY KEY,
+    equipment_no  VARCHAR(32)  NOT NULL COMMENT '生产设备编号',
+    feeder_config VARCHAR(255) NOT NULL COMMENT '飞达配置',
+    key_params    VARCHAR(255) NOT NULL COMMENT '关键工艺参数',
+    config_hash   VARCHAR(64)  NOT NULL COMMENT '配置快照哈希：SHA-256(设备|飞达|参数)',
+    updated_by    VARCHAR(32),
+    updated_at    DATETIME,
+    CONSTRAINT fk_olc_order FOREIGN KEY (order_id) REFERENCES work_order (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------- 换线批次（配置快照 + 版本号 + 首件放行流转） ----------------
+CREATE TABLE line_change_batch (
+    id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+    order_id       BIGINT       NOT NULL,
+    version_no     INT          NOT NULL COMMENT '批次版本号，每工单递增',
+    status         VARCHAR(16)  NOT NULL COMMENT '待首件/待确认/已放行/已驳回/已失效',
+    equipment_no   VARCHAR(32)  NOT NULL COMMENT '生产设备快照',
+    feeder_config  VARCHAR(255) NOT NULL COMMENT '飞达配置快照',
+    key_params     VARCHAR(255) NOT NULL COMMENT '关键工艺参数快照',
+    config_hash    VARCHAR(64)  NOT NULL COMMENT '配置快照哈希，确认时与当前配置比对',
+    change_reason  VARCHAR(255) COMMENT '换线/修正原因',
+    created_by     VARCHAR(32)  NOT NULL COMMENT '建批操作员',
+    created_at     DATETIME,
+    first_result   VARCHAR(16)  COMMENT '首件检测结果：合格/不合格',
+    first_note     VARCHAR(255) COMMENT '首件检测数据',
+    submitted_by   VARCHAR(32)  COMMENT '首件提交人（操作员）',
+    submitted_at   DATETIME,
+    confirmed_by   VARCHAR(32)  COMMENT '确认质检员，不得与提交人同人',
+    confirmed_at   DATETIME,
+    reject_reason  VARCHAR(255) COMMENT '驳回原因（驳回必填）',
+    -- 有效批次占位列：待首件/待确认/已放行时等于 order_id，否则为 NULL。
+    -- 配合唯一索引，数据库层面保证「一张工单最多一个有效版本」，并发下也不会出现两个。
+    active_order_id BIGINT GENERATED ALWAYS AS (IF(status IN ('待首件','待确认','已放行'), order_id, NULL)) STORED COMMENT '有效批次占位：一单一有效版本',
+    CONSTRAINT fk_lcb_order FOREIGN KEY (order_id) REFERENCES work_order (id),
+    UNIQUE KEY uk_lcb_version (order_id, version_no),
+    UNIQUE KEY uk_lcb_active (active_order_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------- 换线处理记录（完整审计链） ----------------
+CREATE TABLE line_change_event (
+    id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id   BIGINT      NOT NULL,
+    action     VARCHAR(16) NOT NULL COMMENT '建批/提交首件/确认放行/驳回/批次失效/修正重提',
+    actor      VARCHAR(32) NOT NULL,
+    detail     VARCHAR(255),
+    created_at DATETIME,
+    CONSTRAINT fk_lce_batch FOREIGN KEY (batch_id) REFERENCES line_change_batch (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- =====================================================================
 -- 种子数据
 -- =====================================================================
@@ -137,3 +191,50 @@ INSERT INTO inspection (order_id, step_name, defect_type, defect_points, sample_
 (5, 'AOI',  '虚焊',  4,  40, '返修', '孙悦', 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 6 HOUR),
 (5, '目检', '少件',  5,  40, '返修', '周涛', 0, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 2 HOUR),
 (3, 'AOI',  '反向',  2,  30, '合格', '孙悦', 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 3 HOUR);
+
+-- 工单当前产线配置：config_hash = SHA2('设备|飞达|参数', 256)，与后端 Dict.configHash 口径一致
+INSERT INTO order_line_config (order_id, equipment_no, feeder_config, key_params, config_hash, updated_by, updated_at) VALUES
+(3, 'SMT-02', 'F01:RC-0603-1K;F04:IC-QFP-MCU;F07:LED-0805-R', '峰值温度245℃；链速80cm/min',
+ SHA2('SMT-02|F01:RC-0603-1K;F04:IC-QFP-MCU;F07:LED-0805-R|峰值温度245℃；链速80cm/min', 256),
+ '王强', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 2 HOUR),
+(5, 'SMT-03', 'F05:IC-BGA-FPGA;F02:CC-0402-100N;F01:RC-0402-10K', '峰值温度242℃；链速78cm/min',
+ SHA2('SMT-03|F05:IC-BGA-FPGA;F02:CC-0402-100N;F01:RC-0402-10K|峰值温度242℃；链速78cm/min', 256),
+ '王强', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 26 HOUR);
+
+-- 换线批次：WO-2026003 的 V1 已失效（配置再变更）、V2 已驳回（首件偏移）、V3 待确认（阻塞贴片中）；
+-- WO-2026005 的 V1 已放行（历史有效放行样例）
+INSERT INTO line_change_batch
+(id, order_id, version_no, status, equipment_no, feeder_config, key_params, config_hash, change_reason, created_by, created_at,
+ first_result, first_note, submitted_by, submitted_at, confirmed_by, confirmed_at, reject_reason) VALUES
+(1, 3, 1, '已失效', 'SMT-01', 'F01:RC-0603-1K;F04:IC-QFP-MCU', '峰值温度240℃；链速75cm/min',
+ SHA2('SMT-01|F01:RC-0603-1K;F04:IC-QFP-MCU|峰值温度240℃；链速75cm/min', 256),
+ 'SMT-01 贴片机上线切换', '王强', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 8 HOUR,
+ '合格', '首件 AOI 检测合格', '李敏', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 7 HOUR, NULL, NULL, NULL),
+(2, 3, 2, '已驳回', 'SMT-02', 'F01:RC-0603-1K;F04:IC-QFP-MCU;F07:LED-0805-R', '峰值温度250℃；链速85cm/min',
+ SHA2('SMT-02|F01:RC-0603-1K;F04:IC-QFP-MCU;F07:LED-0805-R|峰值温度250℃；链速85cm/min', 256),
+ '换 SMT-02 并调整回流焊曲线', '王强', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 6 HOUR,
+ '不合格', '首件偏移 0.3mm，焊盘错位', '李敏', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 5 HOUR,
+ '孙悦', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 4 HOUR, '首件偏移超差，需重新调机并修正温度曲线'),
+(3, 3, 3, '待确认', 'SMT-02', 'F01:RC-0603-1K;F04:IC-QFP-MCU;F07:LED-0805-R', '峰值温度245℃；链速80cm/min',
+ SHA2('SMT-02|F01:RC-0603-1K;F04:IC-QFP-MCU;F07:LED-0805-R|峰值温度245℃；链速80cm/min', 256),
+ '修正吸嘴与温度曲线后重新送检', '王强', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 2 HOUR,
+ '合格', '首件 AOI 检测合格，焊点良好', '李敏', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 1 HOUR, NULL, NULL, NULL),
+(4, 5, 1, '已放行', 'SMT-03', 'F05:IC-BGA-FPGA;F02:CC-0402-100N;F01:RC-0402-10K', '峰值温度242℃；链速78cm/min',
+ SHA2('SMT-03|F05:IC-BGA-FPGA;F02:CC-0402-100N;F01:RC-0402-10K|峰值温度242℃；链速78cm/min', 256),
+ 'FPGA 产线切换', '王强', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 27 HOUR,
+ '合格', '首件检测合格', '李敏', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 26 HOUR,
+ '孙悦', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 25 HOUR, NULL);
+
+-- 换线处理记录：与上面四个批次的流转一一对应
+INSERT INTO line_change_event (batch_id, action, actor, detail, created_at) VALUES
+(1, '建批',     '王强', 'SMT-01 贴片机上线切换', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 8 HOUR),
+(1, '提交首件', '李敏', '首件检测「合格」：首件 AOI 检测合格', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 7 HOUR),
+(1, '批次失效', '王强', '配置再次变更，被 V2 取代', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 6 HOUR),
+(2, '建批',     '王强', '换 SMT-02 并调整回流焊曲线', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 6 HOUR),
+(2, '提交首件', '李敏', '首件检测「不合格」：首件偏移 0.3mm，焊盘错位', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 5 HOUR),
+(2, '驳回',     '孙悦', '首件偏移超差，需重新调机并修正温度曲线', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 4 HOUR),
+(3, '修正重提', '王强', '源自 V2 驳回：首件偏移超差；修正：修正吸嘴与温度曲线后重新送检', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 2 HOUR),
+(3, '提交首件', '李敏', '首件检测「合格」：首件 AOI 检测合格，焊点良好', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 1 HOUR),
+(4, '建批',     '王强', 'FPGA 产线切换', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 27 HOUR),
+(4, '提交首件', '李敏', '首件检测「合格」：首件检测合格', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 26 HOUR),
+(4, '确认放行', '孙悦', '首件确认通过，恢复批量贴片', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 25 HOUR);

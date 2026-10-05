@@ -1,5 +1,8 @@
 package com.electronics.assembly.common;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.List;
 import java.util.Map;
 
@@ -44,6 +47,22 @@ public final class Dict {
 
     /** 判定结论：合格 / 返修 / 判废 */
     public static final List<String> VERDICTS = List.of("合格", "返修", "判废");
+
+    // ---------------- 换线首件放行 ----------------
+    /** 换线批次状态：待首件 → 待确认 → 已放行 / 已驳回；已失效为旁路终态 */
+    public static final List<String> LINE_CHANGE_STATUSES = List.of("待首件", "待确认", "已放行", "已驳回", "已失效");
+
+    /**
+     * 有效批次状态（在途或当前生效的放行）：与 line_change_batch.active_order_id
+     * 生成列的口径一致，同一工单同一时刻最多一个有效批次。
+     */
+    public static final List<String> LINE_CHANGE_ACTIVE = List.of("待首件", "待确认", "已放行");
+
+    /** 首件检测结果：合格 / 不合格 */
+    public static final List<String> FIRST_RESULTS = List.of("合格", "不合格");
+
+    /** 换线处理记录动作 */
+    public static final List<String> LINE_CHANGE_ACTIONS = List.of("建批", "提交首件", "确认放行", "驳回", "批次失效", "修正重提");
 
     // ---------------- 业务阈值 ----------------
     /** 齐套率低于本值不允许投产（%） */
@@ -104,6 +123,35 @@ public final class Dict {
 
     public static boolean isValidVerdict(String verdict) {
         return verdict != null && VERDICTS.contains(verdict);
+    }
+
+    public static boolean isValidLineChangeStatus(String status) {
+        return status != null && LINE_CHANGE_STATUSES.contains(status);
+    }
+
+    public static boolean isValidFirstResult(String result) {
+        return result != null && FIRST_RESULTS.contains(result);
+    }
+
+    /**
+     * 配置快照哈希：SHA-256(设备|飞达|参数) 的小写十六进制。
+     * 与 schema.sql 里 SHA2(CONCAT(设备,'|',飞达,'|',参数), 256) 口径一致，
+     * 确认放行时用它比对批次快照与工单当前配置，防止用过期快照放行。
+     */
+    public static String configHash(String equipmentNo, String feederConfig, String keyParams) {
+        String raw = equipmentNo + "|" + feederConfig + "|" + keyParams;
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(raw.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(64);
+            for (byte b : digest) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+                sb.append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 不可用", e);
+        }
     }
 
     /** 按不良点数自动判定：超过阈值判废，有缺陷但未超判返修，无缺陷合格 */
